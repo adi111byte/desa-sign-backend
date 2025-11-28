@@ -1,6 +1,6 @@
 // server.js
 // Simple signing + recompute-hash service for TA
-// NOTE: production-ready improvements (rate limit, better error handling, input validation) recommended.
+// Minimal production notes: validate inputs, rate-limit, better error handling, and protect keys.
 
 const express = require('express');
 const fetch = require('node-fetch');
@@ -20,8 +20,7 @@ const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 const DEFAULT_BUCKET = process.env.SUPABASE_BUCKET || 'dokumen';
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !PRIVATE_KEY_PEM || !FIREBASE_SERVICE_ACCOUNT_JSON) {
-  console.error('Missing required environment variables. Check SUPABASE_URL, SUPABASE_SERVICE_KEY, PRIVATE_KEY_PEM, FIREBASE_SERVICE_ACCOUNT_JSON');
-  // don't exit; in Railway you can set env before starting
+  console.warn('WARNING: One or more required env vars are not set (SUPABASE_URL, SUPABASE_SERVICE_KEY, PRIVATE_KEY_PEM, FIREBASE_SERVICE_ACCOUNT_JSON). Set them in Railway before deploying.');
 }
 
 // Initialize Firebase Admin if credential provided
@@ -29,8 +28,7 @@ if (FIREBASE_SERVICE_ACCOUNT_JSON) {
   try {
     const sa = JSON.parse(FIREBASE_SERVICE_ACCOUNT_JSON);
     admin.initializeApp({
-      credential: admin.credential.cert(sa),
-      // optionally add databaseURL if used
+      credential: admin.credential.cert(sa)
     });
     console.log('Firebase Admin initialized.');
   } catch (e) {
@@ -38,7 +36,7 @@ if (FIREBASE_SERVICE_ACCOUNT_JSON) {
   }
 }
 
-// utility: download object from Supabase storage (service key required)
+// ---------- Utilities: Supabase download/upload ----------
 async function downloadFromSupabase(bucket, path) {
   const url = `${SUPABASE_URL}/storage/v1/object/${bucket}/${encodeURIComponent(path)}`;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
@@ -46,7 +44,6 @@ async function downloadFromSupabase(bucket, path) {
   return await res.buffer();
 }
 
-// utility: upload object to Supabase
 async function uploadToSupabase(bucket, destPath, buffer) {
   const url = `${SUPABASE_URL}/storage/v1/object/${bucket}/${encodeURIComponent(destPath)}`;
   const res = await fetch(url, {
@@ -61,24 +58,25 @@ async function uploadToSupabase(bucket, destPath, buffer) {
     const bodyText = await res.text().catch(() => '');
     throw new Error(`Supabase upload failed: ${res.status} ${bodyText}`);
   }
-  // public URL pattern (if bucket configured public), otherwise use presigned strategy
+  // public URL pattern (if bucket configured public)
   const publicUrl = `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${encodeURIComponent(destPath)}`;
   return publicUrl;
 }
 
+// ---------- Crypto helpers ----------
 function sha256Hex(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
 function signHex(hashHex) {
   const signer = crypto.createSign('RSA-SHA256');
-  // We sign the binary of the hash so client/server agree on what was signed
+  // sign binary of the hash so both sides agree
   signer.update(Buffer.from(hashHex, 'hex'));
   signer.end();
   return signer.sign(PRIVATE_KEY_PEM, 'base64');
 }
 
-// middleware: verify firebase id token
+// ---------- Firebase token middleware ----------
 async function verifyFirebaseTokenFromHeader(req, res, next) {
   try {
     const authHeader = req.headers.authorization || '';
@@ -97,6 +95,70 @@ async function verifyFirebaseTokenFromHeader(req, res, next) {
   }
 }
 
+// ---------- Core sign logic (reusable) ----------
+async function doSign(docId, reqUser) {
+  if (!admin.apps.length) throw new Error('Firebase Admin not initialized');
+  const snap = await admin.firestore().collection('dokumen_pengajuan').doc(docId).get();
+  if (!snap.exists) throw new Error('Document not found');
+  const meta = snap.data() || {};
+  const bucket = meta.bucket || DEFAULT_BUCKET;
+  const path = meta.file_path;
+  if (!path) throw new Error('file_path missing in metadata');
+
+  // download original pdf
+  const buf = await downloadFromSupabase(bucket, path);
+
+  // compute hash and sign
+  const hashHex = sha256Hex(buf);
+  const signatureBase64 = signHex(hashHex);
+
+  // generate QR payload (JSON string)
+  const qrPayload = JSON.stringify({
+    docId,
+    signature: signatureBase64,
+    algo: 'RSASSA-PKCS1-v1_5-SHA256'
+  });
+  const qrDataUrl = await QRCode.toDataURL(qrPayload);
+
+  // embed QR into PDF (bottom-right of last page)
+  const pdfDoc = await PDFDocument.load(buf);
+  const pages = pdfDoc.getPages();
+  const lastPage = pages[pages.length - 1];
+  const pngBytes = Buffer.from(qrDataUrl.split(',')[1], 'base64');
+  const pngImage = await pdfDoc.embedPng(pngBytes);
+  const { width, height } = lastPage.getSize();
+  const imgW = Math.min(140, width * 0.2);
+  const imgH = Math.min(140, height * 0.2);
+  lastPage.drawImage(pngImage, { x: width - imgW - 32, y: 32, width: imgW, height: imgH });
+
+  const signedPdfBytes = await pdfDoc.save();
+
+  // upload signed PDF
+  const destPath = `signed/${docId}_signed.pdf`;
+  const signedUrl = await uploadToSupabase(bucket, destPath, signedPdfBytes);
+
+  // update firestore: add signature, signed_pdf_url, qr_payload, status etc.
+  await admin.firestore().collection('dokumen_pengajuan').doc(docId).update({
+    signature: signatureBase64,
+    signed_pdf_url: signedUrl,
+    qr_payload: qrPayload,
+    status: 'Diterima',
+    signed_at: admin.firestore.FieldValue.serverTimestamp(),
+    signed_by_uid: reqUser ? reqUser.uid : null
+  });
+
+  // audit log
+  await admin.firestore().collection('dokumen_pengajuan').doc(docId).collection('audit_logs').add({
+    action: 'sign',
+    by: reqUser ? reqUser.uid : null,
+    at: admin.firestore.FieldValue.serverTimestamp()
+  });
+
+  return { signatureBase64, signedUrl, qrPayload };
+}
+
+// ---------- Routes ----------
+
 // POST /recompute-hash
 // body: { "docId": "..." }
 app.post('/recompute-hash', verifyFirebaseTokenFromHeader, async (req, res) => {
@@ -107,7 +169,7 @@ app.post('/recompute-hash', verifyFirebaseTokenFromHeader, async (req, res) => {
 
     const snap = await admin.firestore().collection('dokumen_pengajuan').doc(docId).get();
     if (!snap.exists) return res.status(404).json({ error: 'Document not found' });
-    const meta = snap.data();
+    const meta = snap.data() || {};
     const bucket = meta.bucket || DEFAULT_BUCKET;
     const path = meta.file_path;
     if (!path) return res.status(400).json({ error: 'file_path missing in metadata' });
@@ -138,67 +200,32 @@ app.post('/sign', verifyFirebaseTokenFromHeader, async (req, res) => {
     const { docId } = req.body;
     if (!docId) return res.status(400).json({ error: 'docId required' });
 
-    const snap = await admin.firestore().collection('dokumen_pengajuan').doc(docId).get();
-    if (!snap.exists) return res.status(404).json({ error: 'Document not found' });
-    const meta = snap.data();
-    const bucket = meta.bucket || DEFAULT_BUCKET;
-    const path = meta.file_path;
-    if (!path) return res.status(400).json({ error: 'file_path missing in metadata' });
-
-    // download original pdf
-    const buf = await downloadFromSupabase(bucket, path);
-
-    // compute hash and sign
-    const hashHex = sha256Hex(buf);
-    const signatureBase64 = signHex(hashHex);
-
-    // generate QR payload (you may customize)
-    const qrPayload = JSON.stringify({ docId, signature: signatureBase64, algo: 'RSASSA-PKCS1-v1_5-SHA256' });
-    const qrDataUrl = await QRCode.toDataURL(qrPayload);
-
-    // embed QR into PDF (bottom-right of last page)
-    const pdfDoc = await PDFDocument.load(buf);
-    const pages = pdfDoc.getPages();
-    const lastPage = pages[pages.length - 1];
-    // embed image
-    const pngBytes = Buffer.from(qrDataUrl.split(',')[1], 'base64');
-    const pngImage = await pdfDoc.embedPng(pngBytes);
-    const { width, height } = lastPage.getSize();
-    // image size in points
-    const imgW = Math.min(140, width * 0.2);
-    const imgH = Math.min(140, height * 0.2);
-    lastPage.drawImage(pngImage, { x: width - imgW - 32, y: 32, width: imgW, height: imgH });
-
-    const signedPdfBytes = await pdfDoc.save();
-
-    // upload signed PDF
-    const destPath = `signed/${docId}_signed.pdf`;
-    const signedUrl = await uploadToSupabase(bucket, destPath, signedPdfBytes);
-
-    // update firestore
-    await admin.firestore().collection('dokumen_pengajuan').doc(docId).update({
-      signature: signatureBase64,
-      signed_pdf_url: signedUrl,
-      status: 'Diterima',
-      signed_at: admin.firestore.FieldValue.serverTimestamp(),
-      signed_by_uid: req.user.uid
-    });
-
-    // optional: add audit log
-    await admin.firestore().collection('dokumen_pengajuan').doc(docId).collection('audit_logs').add({
-      action: 'sign',
-      by: req.user.uid,
-      at: admin.firestore.FieldValue.serverTimestamp()
-    });
-
-    return res.json({ signatureBase64, signedPdfUrl: signedUrl });
+    const { signatureBase64, signedUrl, qrPayload } = await doSign(docId, req.user);
+    // return fields that client expects
+    return res.json({ signatureBase64, signedPdfUrl: signedUrl, qrPayload });
   } catch (err) {
     console.error(err);
     return res.status(500).json({ error: err.message });
   }
 });
 
-// health
+// Compatibility wrapper: POST /api/documents/:docId/sign
+// Some Android clients call /api/documents/:docId/sign — support it.
+app.post('/api/documents/:docId/sign', verifyFirebaseTokenFromHeader, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin_desa') return res.status(403).json({ error: 'Forbidden' });
+    const docId = req.params.docId;
+    if (!docId) return res.status(400).json({ error: 'docId required in path' });
+
+    const { signatureBase64, signedUrl, qrPayload } = await doSign(docId, req.user);
+    return res.json({ signatureBase64, signedPdfUrl: signedUrl, qrPayload });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Health
 app.get('/', (req, res) => res.json({ ok: true }));
 
 const PORT = process.env.PORT || 3000;
