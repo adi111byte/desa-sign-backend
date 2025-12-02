@@ -1,49 +1,54 @@
-// server.js
-// Simple signing + recompute-hash service for TA
-// Minimal production notes: validate inputs, rate-limit, better error handling, and protect keys.
+// server.js - Smart Dokumen Desa (FINAL VERSION )
 const express = require('express');
 const fetch = require('node-fetch');
 const QRCode = require('qrcode');
 const { PDFDocument, rgb, degrees, StandardFonts } = require('pdf-lib');
 const crypto = require('crypto');
 const admin = require('firebase-admin');
+const helmet = require('helmet');
+const rateLimit = require("express-rate-limit");
 
 const app = express();
 app.use(express.json({ limit: '20mb' }));
+app.use(helmet());
 
-// Required env vars
+// Rate limit anti spam
+const limiter = rateLimit({
+  windowMs: 60_000,
+  max: 6,
+  message: { success: false, error: "Terlalu banyak percobaan. Tunggu 1 menit." }
+});
+app.use("/api/documents", limiter);
+
+// === EXACTLY YOUR 6 VARIABLES ONLY ===
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const PRIVATE_KEY_PEM = process.env.PRIVATE_KEY_PEM;
 const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
-const DEFAULT_BUCKET = process.env.SUPABASE_BUCKET || 'dokumen';
+const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'document';
+const PORT = process.env.PORT || 3000;
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !PRIVATE_KEY_PEM || !FIREBASE_SERVICE_ACCOUNT_JSON) {
-  console.warn('WARNING: One or more required env vars are not set.');
-}
-
+// Firebase Admin Init
 if (FIREBASE_SERVICE_ACCOUNT_JSON) {
   try {
     const sa = JSON.parse(FIREBASE_SERVICE_ACCOUNT_JSON);
-    admin.initializeApp({
-      credential: admin.credential.cert(sa)
-    });
-    console.log('Firebase Admin initialized.');
+    admin.initializeApp({ credential: admin.credential.cert(sa) });
+    console.log('Firebase Admin OK');
   } catch (e) {
-    console.error('Failed to parse FIREBASE_SERVICE_ACCOUNT_JSON', e.message);
+    console.error('Firebase init error:', e.message);
   }
 }
 
-// ---------- Utilities ----------
-async function downloadFromSupabase(bucket, path) {
-  const url = `${SUPABASE_URL}/storage/v1/object/${bucket}/${encodeURIComponent(path)}`;
+// === SUPABASE HELPER ===
+async function downloadFromSupabase(path) {
+  const url = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${encodeURIComponent(path)}`;
   const res = await fetch(url, { headers: { Authorization: `Bearer ${SUPABASE_SERVICE_KEY}` } });
-  if (!res.ok) throw new Error(`Supabase download failed: ${res.status}`);
+  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
   return await res.buffer();
 }
 
-async function uploadToSupabase(bucket, destPath, buffer) {
-  const url = `${SUPABASE_URL}/storage/v1/object/${bucket}/${encodeURIComponent(destPath)}`;
+async function uploadToSupabase(destPath, buffer) {
+  const url = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${encodeURIComponent(destPath)}`;
   const res = await fetch(url, {
     method: 'PUT',
     headers: {
@@ -52,183 +57,108 @@ async function uploadToSupabase(bucket, destPath, buffer) {
     },
     body: buffer
   });
-  if (!res.ok) {
-    const bodyText = await res.text().catch(() => '');
-    throw new Error(`Supabase upload failed: ${res.status} ${bodyText}`);
-  }
-  return `${SUPABASE_URL}/storage/v1/object/public/${bucket}/${encodeURIComponent(destPath)}`;
+  if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+  return `${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${encodeURIComponent(destPath)}`;
 }
 
-// ---------- Crypto ----------
-function sha256Hex(buffer) {
-  return crypto.createHash('sha256').update(buffer).digest('hex');
-}
+// === CRYPTO ===
+const sha256Hex = buf => crypto.createHash('sha256').update(buf).digest('hex');
+const signHex = hashHex => crypto.createSign('RSA-SHA256')
+  .update(Buffer.from(hashHex, 'hex')).end()
+  .sign(PRIVATE_KEY_PEM, 'base64');
 
-function signHex(hashHex) {
-  const signer = crypto.createSign('RSA-SHA256');
-  signer.update(Buffer.from(hashHex, 'hex'));
-  signer.end();
-  return signer.sign(PRIVATE_KEY_PEM, 'base64');
-}
-
-// ---------- Firebase Token ----------
+// === TOKEN VERIFICATION ===
 async function verifyFirebaseTokenFromHeader(req, res, next) {
   try {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
-    if (!token) return res.status(401).json({ error: 'Missing token' });
-    if (!admin.apps.length) return res.status(500).json({ error: 'Firebase Admin not initialized' });
+    if (!token) return res.status(401).json({ success: false, error: 'No token' });
     const decoded = await admin.auth().verifyIdToken(token);
     req.user = decoded;
-    const userDoc = await admin.firestore().collection('users').doc(decoded.uid).get();
-    req.user.role = userDoc.exists ? userDoc.data().role : null;
+    const userSnap = await admin.firestore().collection('users').doc(decoded.uid).get();
+    req.user.role = userSnap.exists ? userSnap.data().role : null;
     next();
   } catch (err) {
-    console.error('Token verify failed:', err.message);
-    return res.status(401).json({ error: 'Unauthorized' });
+    return res.status(401).json({ success: false, error: 'Unauthorized' });
   }
 }
 
-// ---------- CORE SIGN LOGIC (DENGAN WATERMARK + STEMPEL + QR CANTIK) ----------
-async function doSign(docId, reqUser) {
-  if (!admin.apps.length) throw new Error('Firebase Admin not initialized');
+// === CORE SIGN (WATERMARK + STEMPEL + QR) ===
+async function doSign(docId, user) {
   const snap = await admin.firestore().collection('dokumen_pengajuan').doc(docId).get();
-  if (!snap.exists) throw new Error('Document not found');
-  const meta = snap.data() || {};
-  const bucket = meta.bucket || DEFAULT_BUCKET;
-  const path = meta.file_path;
-  if (!path) throw new Error('file_path missing in metadata');
+  if (!snap.exists) throw new Error('Dokumen tidak ditemukan');
+  const data = snap.data();
+  const filePath = data.file_path || data.file_url;
+  if (!filePath) throw new Error('file_path tidak ada');
 
-  const buf = await downloadFromSupabase(bucket, path);
-  const hashHex = sha256Hex(buf);
-  const signatureBase64 = signHex(hashHex);
+  const pdfBuffer = await downloadFromSupabase(filePath);
+  const hash = sha256Hex(pdfBuffer);
+  const signature = signHex(hash);
 
-  const qrPayload = JSON.stringify({
-    docId,
-    signature: signatureBase64,
-    algo: 'RSASSA-PKCS1-v1_5-SHA256',
-    hash: hashHex
-  });
+  const qrPayload = JSON.stringify({ docId, hash, signature, algo: 'RSA-SHA256' });
+  const qrImage = await QRCode.toDataURL(qrPayload);
 
-  const qrDataUrl = await QRCode.toDataURL(qrPayload);
-  const pdfDoc = await PDFDocument.load(buf);
+  const pdfDoc = await PDFDocument.load(pdfBuffer);
   const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  const pages = pdfDoc.getPages();
-  const lastPage = pages[pages.length - 1];
-  const { width, height } = lastPage.getSize();
+  const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const page = pdfDoc.getPages()[pdfDoc.getPageCount() - 1];
+  const { width, height } = page.getSize();
 
-  // 1. WATERMARK DIAGONAL
-  lastPage.drawText('DITANDATANGANI SECARA DIGITAL', {
-    x: 80,
-    y: height / 2 + 100,
-    size: 64,
-    font: helveticaBold,
-    color: rgb(0.85, 0.1, 0.1),
-    rotate: degrees(-45),
-    opacity: 0.22,
+  // Watermark diagonal
+  page.drawText('DITANDATANGANI SECARA DIGITAL', {
+    x: 80, y: height / 2 + 100, size: 64, font: bold,
+    color: rgb(0.85, 0.1, 0.1), rotate: degrees(-45), opacity: 0.22
   });
 
-  // 2. STEMPEL RESMI KANAN BAWAH
-  lastPage.drawRectangle({
-    x: width - 260,
-    y: 40,
-    width: 230,
-    height: 150,
-    borderColor: rgb(0, 0.4, 0),
-    borderWidth: 4,
-    color: rgb(1, 1, 1),
-  });
-  lastPage.drawText('DITANDATANGANI DIGITAL', {
-    x: width - 245,
-    y: 165,
-    size: 14,
-    font: helveticaBold,
-    color: rgb(0, 0.5, 0),
-  });
-  lastPage.drawText('KEPALA DESA PUCANGRO', {
-    x: width - 245,
-    y: 140,
-    size: 12,
-    font: helveticaBold,
-    color: rgb(0, 0, 0),
-  });
-  lastPage.drawText(`Tgl: ${new Date().toLocaleDateString('id-ID')}`, {
-    x: width - 245,
-    y: 115,
-    size: 11,
-    font: helvetica,
-    color: rgb(0, 0, 0),
-  });
+  // Stempel + QR
+  page.drawRectangle({ x: width - 260, y: 40, width: 230, height: 150, borderColor: rgb(0,0.4,0), borderWidth: 4 });
+  page.drawText('KEPALA DESA PUCANGRO', { x: width - 245, y: 140, size: 12, font: bold });
+  page.drawText(`Tgl: ${new Date().toLocaleDateString('id-ID')}`, { x: width - 245, y: 115, size: 11, font: helvetica });
 
-  // 3. QR CODE + TULISAN DI KIRI BAWAH
-  const pngBytes = Buffer.from(qrDataUrl.split(',')[1], 'base64');
-  const pngImage = await pdfDoc.embedPng(pngBytes);
-  lastPage.drawImage(pngImage, { x: 40, y: 40, width: 130, height: 130 });
-  lastPage.drawText('Verifikasi Dokumen', {
-    x: 40,
-    y: 25,
-    size: 12,
-    font: helveticaBold,
-    color: rgb(0, 0, 0),
-  });
-  lastPage.drawText('Scan QR Code ini', {
-    x: 40,
-    y: 10,
-    size: 10,
-    font: helvetica,
-    color: rgb(0.3, 0.3, 0.3),
-  });
+  const qrPng = await pdfDoc.embedPng(Buffer.from(qrImage.split(',')[1], 'base64'));
+  page.drawImage(qrPng, { x: 40, y: 40, width: 130, height: 130 });
+  page.drawText('Scan QR untuk verifikasi', { x: 40, y: 20, size: 10, font: helvetica });
 
-  const signedPdfBytes = await pdfDoc.save();
-  const destPath = `signed/${docId}_signed.pdf`;
-  const signedUrl = await uploadToSupabase(bucket, destPath, signedPdfBytes);
+  const signedPdf = await pdfDoc.save();
+  const signedUrl = await uploadToSupabase(`signed/${docId}_signed.pdf`, signedPdf);
 
   await admin.firestore().collection('dokumen_pengajuan').doc(docId).update({
-    signature: signatureBase64,
-    signed_pdf_url: signedUrl,
-    qr_payload: qrPayload,
     status: 'Ditandatangani',
+    signed_file_url: signedUrl,
+    hash_sha256: hash,
+    signature,
+    qr_payload: qrPayload,
     signed_at: admin.firestore.FieldValue.serverTimestamp(),
-    signed_by_uid: reqUser?.uid || null,
-    hash_sha256: hashHex
+    signed_by_uid: user.uid
   });
 
-  await admin.firestore().collection('dokumen_pengajuan').doc(docId).collection('audit_logs').add({
-    action: 'sign',
-    by: reqUser?.uid || null,
-    at: admin.firestore.FieldValue.serverTimestamp()
-  });
-
-  return { signatureBase64, signedUrl, qrPayload };
+  return { hash, signature, signedUrl, qrPayload };
 }
 
-// ---------- Routes (sama persis seperti asli) ----------
-app.post('/recompute-hash', verifyFirebaseTokenFromHeader, async (req, res) => { /* sama */ });
-app.post('/sign', verifyFirebaseTokenFromHeader, async (req, res) => {
-  try {
-    if (req.user.role !== 'admin_desa') return res.status(403).json({ error: 'Forbidden' });
-    const { docId } = req.body;
-    if (!docId) return res.status(400).json({ error: 'docId required' });
-    const result = await doSign(docId, req.user);
-    return res.json({ signatureBase64: result.signatureBase64, signedPdfUrl: result.signedUrl, qrPayload: result.qrPayload });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: err.message });
-  }
-});
-
+// === ROUTE UTAMA ===
 app.post('/api/documents/:docId/sign', verifyFirebaseTokenFromHeader, async (req, res) => {
   try {
-    if (req.user.role !== 'admin_desa') return res.status(403).json({ error: 'Forbidden' });
-    const docId = req.params.docId;
-    const result = await doSign(docId, req.user);
-    return res.json({ signatureBase64: result.signatureBase64, signedPdfUrl: result.signedUrl, qrPayload: result.qrPayload });
+    if (req.user.role !== 'admin_desa') return res.status(403).json({ success: false, error: 'Akses ditolak' });
+    
+    const { hash, signature, signedUrl, qrPayload } = await doSign(req.params.docId, req.user);
+
+    res.json({
+      success: true,
+      message: "Dokumen berhasil ditandatangani oleh Kepala Desa Pucangro",
+      docId: req.params.docId,
+      algorithm: "RSA-2048 + SHA-256",
+      hash_sha256: hash,
+      signature_base64: signature,
+      signed_file_url: signedUrl,
+      qr_payload: qrPayload,
+      features: { watermark: true, stempel: true, qr_verification: true },
+      signed_at: new Date().toLocaleString('id-ID')
+    });
   } catch (err) {
     console.error(err);
-    return res.status(500).json({ error: err.message });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.get('/', (req, res) => res.json({ ok: true }));
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server listening on ${PORT} A+++ WITH WATERMARK & STEMPEL`));
+app.get('/', (req, res) => res.json({ success: true, message: "Smart Dokumen Desa - Ready A+++" }));
+
+app.listen(PORT, () => console.log(`Server jalan di port ${PORT} — RSA + Watermark + QR = LOCKED`));
