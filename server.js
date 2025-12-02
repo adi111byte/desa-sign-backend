@@ -1,8 +1,8 @@
-// server.js - Smart Dokumen Desa (FINAL VERSION )
+// server.js - Smart Dokumen Desa (FINAL + DESAIN SESUAI PERMINTAAN)
 const express = require('express');
 const fetch = require('node-fetch');
 const QRCode = require('qrcode');
-const { PDFDocument, rgb, degrees, StandardFonts } = require('pdf-lib');
+const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const crypto = require('crypto');
 const admin = require('firebase-admin');
 const helmet = require('helmet');
@@ -82,7 +82,7 @@ async function verifyFirebaseTokenFromHeader(req, res, next) {
   }
 }
 
-// === CORE SIGN (WATERMARK + STEMPEL + QR) ===
+// === CORE SIGN (SESUAI DESAIN PERMINTAAN) ===
 async function doSign(docId, user) {
   const snap = await admin.firestore().collection('dokumen_pengajuan').doc(docId).get();
   if (!snap.exists) throw new Error('Dokumen tidak ditemukan');
@@ -90,37 +90,64 @@ async function doSign(docId, user) {
   const filePath = data.file_path || data.file_url;
   if (!filePath) throw new Error('file_path tidak ada');
 
+  // 1. Ambil dokumen asli
   const pdfBuffer = await downloadFromSupabase(filePath);
-  const hash = sha256Hex(pdfBuffer);
-  const signature = signHex(hash);
+  const pdfDoc = await PDFDocument.load(pdfBuffer);
 
+  // 2. Simpan PDF sementara (belum ada QR/stempel)
+  const pdfWithoutStamp = await pdfDoc.save();
+
+  // 3. Hitung hash & signature dari PDF tanpa stempel (karena stempel+QR hanya metadata visual)
+  const hash = sha256Hex(pdfWithoutStamp);
+  const signature = signHex(hash);
   const qrPayload = JSON.stringify({ docId, hash, signature, algo: 'RSA-SHA256' });
   const qrImage = await QRCode.toDataURL(qrPayload);
 
-  const pdfDoc = await PDFDocument.load(pdfBuffer);
-  const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const bold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-  const page = pdfDoc.getPages()[pdfDoc.getPageCount() - 1];
-  const { width, height } = page.getSize();
+  // 4. Tambahkan stempel + QR ke PDF
+  const finalPdfDoc = await PDFDocument.load(pdfWithoutStamp);
+  const helvetica = await finalPdfDoc.embedFont(StandardFonts.Helvetica);
+  const bold = await finalPdfDoc.embedFont(StandardFonts.HelveticaBold);
+  const page = finalPdfDoc.getPages()[finalPdfDoc.getPageCount() - 1];
+  const { width } = page.getSize();
 
-  // Watermark diagonal
-  page.drawText('DITANDATANGANI SECARA DIGITAL', {
-    x: 80, y: height / 2 + 100, size: 64, font: bold,
-    color: rgb(0.85, 0.1, 0.1), rotate: degrees(-45), opacity: 0.22
+  // === TANDA TANGAN ELEKTRONIK + QR DI POJOK KANAN BAWAH ===
+  const qrSize = 90;
+  const qrX = width - qrSize - 30; // 30px dari kanan
+  const qrY = 40; // 40px dari bawah
+
+  // Embed QR
+  const qrPng = await finalPdfDoc.embedPng(Buffer.from(qrImage.split(',')[1], 'base64'));
+  page.drawImage(qrPng, {
+    x: qrX,
+    y: qrY,
+    width: qrSize,
+    height: qrSize
   });
 
-  // Stempel + QR
-  page.drawRectangle({ x: width - 260, y: 40, width: 230, height: 150, borderColor: rgb(0,0.4,0), borderWidth: 4 });
-  page.drawText('KEPALA DESA PUCANGRO', { x: width - 245, y: 140, size: 12, font: bold });
-  page.drawText(`Tgl: ${new Date().toLocaleDateString('id-ID')}`, { x: width - 245, y: 115, size: 11, font: helvetica });
+  // Teks di atas QR
+  const stampLines = [
+    "Ditandatangani secara elektronik oleh:",
+    "KEPALA DESA PUCANGRO",
+    `Tgl: ${new Date().toLocaleDateString('id-ID')}`
+  ];
+  const fontSize = 7.5;
+  const textX = qrX;
+  const textY = qrY + qrSize + 8; // 8px di atas QR
+  stampLines.forEach((line, i) => {
+    page.drawText(line, {
+      x: textX,
+      y: textY - (i * fontSize * 1.3),
+      size: fontSize,
+      font: (i === 1 ? bold : helvetica),
+      color: rgb(0, 0, 0)
+    });
+  });
 
-  const qrPng = await pdfDoc.embedPng(Buffer.from(qrImage.split(',')[1], 'base64'));
-  page.drawImage(qrPng, { x: 40, y: 40, width: 130, height: 130 });
-  page.drawText('Scan QR untuk verifikasi', { x: 40, y: 20, size: 10, font: helvetica });
-
-  const signedPdf = await pdfDoc.save();
+  // 5. Simpan PDF final
+  const signedPdf = await finalPdfDoc.save();
   const signedUrl = await uploadToSupabase(`signed/${docId}_signed.pdf`, signedPdf);
 
+  // 6. Simpan ke Firestore
   await admin.firestore().collection('dokumen_pengajuan').doc(docId).update({
     status: 'Ditandatangani',
     signed_file_url: signedUrl,
@@ -150,7 +177,7 @@ app.post('/api/documents/:docId/sign', verifyFirebaseTokenFromHeader, async (req
       signature_base64: signature,
       signed_file_url: signedUrl,
       qr_payload: qrPayload,
-      features: { watermark: true, stempel: true, qr_verification: true },
+      features: { stempel: true, qr_verification: true },
       signed_at: new Date().toLocaleString('id-ID')
     });
   } catch (err) {
@@ -161,4 +188,4 @@ app.post('/api/documents/:docId/sign', verifyFirebaseTokenFromHeader, async (req
 
 app.get('/', (req, res) => res.json({ success: true, message: "Smart Dokumen Desa - Ready A+++" }));
 
-app.listen(PORT, () => console.log(`Server jalan di port ${PORT} — RSA + Watermark + QR = LOCKED`));
+app.listen(PORT, () => console.log(`Server jalan di port ${PORT} — RSA + QR = LOCKED`));
