@@ -1,20 +1,18 @@
 {
-  "name": "desa-sign-backend",
+  "name": "smart-dokumen-desa",
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "engines": {
-    "node": "18.x"
-  },
   "dependencies": {
     "express": "^4.18.2",
-    "node-fetch": "^2.6.7",
+    "qrcode": "^1.5.3",
     "pdf-lib": "^1.17.1",
-    "qrcode": "^1.5.1",
-    "firebase-admin": "^11.10.0",
-    "helmet": "^7.1.0",
-    "express-rate-limit": "^7.4.1"
+    "firebase-admin": "^12.0.0",
+    "helmet": "^7.0.0",
+    "express-rate-limit": "^6.8.0",
+    "node-fetch": "^2.6.7",
+    "@supabase/supabase-js": "^2.45.4" 
   }
 }
