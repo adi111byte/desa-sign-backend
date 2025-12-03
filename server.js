@@ -1,5 +1,3 @@
-// server.js - Smart Dokumen Desa (FINAL A+++ FIXED)
-// Fix terakhir 03 Desember 2025 — semua error mati total
 
 global.fetch = require('node-fetch');
 const express = require('express');
@@ -91,7 +89,7 @@ async function verifyFirebaseTokenFromHeader(req, res, next) {
   }
 }
 
-// === CORE SIGN (FIXED: QR LEBIH BESAR & TEKS TIDAK TERPOTONG) ===
+// === CORE SIGN (FIXED: QR LEBIH BESAR & TEKS TIDAK TERPOTONG + ADA RUANG) ===
 async function doSign(docId, user) {
   const snap = await admin.firestore().collection('dokumen_pengajuan').doc(docId).get();
   if (!snap.exists) throw new Error('Dokumen tidak ditemukan');
@@ -116,21 +114,21 @@ async function doSign(docId, user) {
 
   // === FIX: QR LEBIH BESAR & POSISI LEBIH TEPAT ===
   const qrSize = 150; // DARI 90 JADI 150
-  const qrX = width - qrSize - 30;
+  const qrX = width - qrSize - 50; // DARI 30 JADI 50 → lebih jauh dari kanan
   const qrY = 40;
   const qrPng = await finalPdfDoc.embedPng(Buffer.from(qrImage.split(',')[1], 'base64'));
 
   page.drawImage(qrPng, { x: qrX, y: qrY, width: qrSize, height: qrSize });
 
-  // === FIX: TEKS LEBIH BESAR & TIDAK TERPOTONG ===
+  // === FIX: TEKS TIDAK TERPOTONG & ADA RUANG DI BAWAH ===
   const stampLines = [
     "Ditandatangani secara elektronik oleh:",
     "KEPALA DESA PUCANGRO",
     `Tgl: ${new Date().toLocaleDateString('id-ID')}`
   ];
-  const fontSize = 10; // DARI 7.5 JADI 10
+  const fontSize = 9; // DARI 10 JADI 9 → lebih kecil untuk mencegah overflow
   const textX = qrX;
-  const textY = qrY + qrSize + 15; // DARI 8 JADI 15
+  const textY = qrY + qrSize + 25; // DARI 15 JADI 25 → lebih banyak ruang di bawah teks
 
   stampLines.forEach((line, i) => {
     page.drawText(line, {
