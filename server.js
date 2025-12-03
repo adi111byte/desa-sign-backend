@@ -1,4 +1,4 @@
-// server.js - Smart Dokumen Desa (FINAL A+++ LOCKED 1000/100)
+// server.js - Smart Dokumen Desa (FINAL A+++ FIXED)
 // Fix terakhir 03 Desember 2025 — semua error mati total
 
 global.fetch = require('node-fetch');
@@ -9,7 +9,7 @@ const crypto = require('crypto');
 const admin = require('firebase-admin');
 const helmet = require('helmet');
 const rateLimit = require("express-rate-limit");
-const { createClient } = require('@supabase/supabase-js'); // ← TAMBAHAN PENTING
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.set('trust proxy', 1);
@@ -31,7 +31,7 @@ const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'document';
 const PORT = process.env.PORT || 3000;
 
-// === INIT SUPABASE CLIENT (INI YANG NGENTOTIN SELAMA INI) ===
+// === INIT SUPABASE CLIENT ===
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 // === INIT FIREBASE ADMIN ===
@@ -45,7 +45,7 @@ if (FIREBASE_SERVICE_ACCOUNT_JSON) {
   }
 }
 
-// === SUPABASE HELPER (VERSI BARU YANG 1000% JALAN) ===
+// === SUPABASE HELPER (VERSI FIX) ===
 async function downloadFromSupabase(path) {
   const { data, error } = await supabase.storage
     .from(SUPABASE_BUCKET)
@@ -59,7 +59,7 @@ async function uploadToSupabase(destPath, buffer) {
     .from(SUPABASE_BUCKET)
     .upload(destPath, buffer, {
       contentType: 'application/pdf',
-      upsert: true,                    // INI YANG MEMBUAT SEMUA ERROR LENYAP
+      upsert: true,
       cacheControl: '3600'
     });
 
@@ -91,7 +91,7 @@ async function verifyFirebaseTokenFromHeader(req, res, next) {
   }
 }
 
-// === CORE SIGN (Gak berubah, udah perfect) ===
+// === CORE SIGN (FIXED: QR LEBIH BESAR & TEKS TIDAK TERPOTONG) ===
 async function doSign(docId, user) {
   const snap = await admin.firestore().collection('dokumen_pengajuan').doc(docId).get();
   if (!snap.exists) throw new Error('Dokumen tidak ditemukan');
@@ -113,27 +113,31 @@ async function doSign(docId, user) {
   const bold = await finalPdfDoc.embedFont(StandardFonts.HelveticaBold);
   const page = finalPdfDoc.getPages()[finalPdfDoc.getPageCount() - 1];
   const { width } = page.getSize();
-  const qrSize = 90;
+
+  // === FIX: QR LEBIH BESAR & POSISI LEBIH TEPAT ===
+  const qrSize = 150; // DARI 90 JADI 150
   const qrX = width - qrSize - 30;
   const qrY = 40;
   const qrPng = await finalPdfDoc.embedPng(Buffer.from(qrImage.split(',')[1], 'base64'));
 
   page.drawImage(qrPng, { x: qrX, y: qrY, width: qrSize, height: qrSize });
 
+  // === FIX: TEKS LEBIH BESAR & TIDAK TERPOTONG ===
   const stampLines = [
     "Ditandatangani secara elektronik oleh:",
     "KEPALA DESA PUCANGRO",
     `Tgl: ${new Date().toLocaleDateString('id-ID')}`
   ];
-  const fontSize = 7.5;
+  const fontSize = 10; // DARI 7.5 JADI 10
   const textX = qrX;
-  const textY = qrY + qrSize + 8;
+  const textY = qrY + qrSize + 15; // DARI 8 JADI 15
+
   stampLines.forEach((line, i) => {
     page.drawText(line, {
       x: textX,
       y: textY - (i * fontSize * 1.3),
       size: fontSize,
-      font: (i === 1 ? bold : helvetica),
+      font: (i === 1 ? bold : helvetica), // "KEPALA DESA..." TEBAL
       color: rgb(0, 0, 0)
     });
   });
