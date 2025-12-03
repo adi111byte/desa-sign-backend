@@ -1,6 +1,7 @@
-// server.js - Smart Dokumen Desa (FINAL + DESAIN SESUAI PERMINTAAN)
+// server.js - Smart Dokumen Desa (FINAL + 1000/100 A+++)
+global.fetch = require('node-fetch'); 
+
 const express = require('express');
-const fetch = require('node-fetch');
 const QRCode = require('qrcode');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const crypto = require('crypto');
@@ -13,7 +14,6 @@ app.set('trust proxy', 1);
 app.use(express.json({ limit: '20mb' }));
 app.use(helmet());
 
-// Rate limit anti spam
 const limiter = rateLimit({
   windowMs: 60_000,
   max: 6,
@@ -21,7 +21,7 @@ const limiter = rateLimit({
 });
 app.use("/api/documents", limiter);
 
-// === EXACTLY YOUR 6 VARIABLES ONLY ===
+// === ENV VARIABLES (pastikan 6 ini ada di Railway) ===
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const PRIVATE_KEY_PEM = process.env.PRIVATE_KEY_PEM;
@@ -83,7 +83,7 @@ async function verifyFirebaseTokenFromHeader(req, res, next) {
   }
 }
 
-// === CORE SIGN (SESUAI DESAIN PERMINTAAN) ===
+// === CORE SIGN ===
 async function doSign(docId, user) {
   const snap = await admin.firestore().collection('dokumen_pengajuan').doc(docId).get();
   if (!snap.exists) throw new Error('Dokumen tidak ditemukan');
@@ -91,41 +91,27 @@ async function doSign(docId, user) {
   const filePath = data.file_path || data.file_url;
   if (!filePath) throw new Error('file_path tidak ada');
 
-  // 1. Ambil dokumen asli
   const pdfBuffer = await downloadFromSupabase(filePath);
   const pdfDoc = await PDFDocument.load(pdfBuffer);
-
-  // 2. Simpan PDF sementara (belum ada QR/stempel)
   const pdfWithoutStamp = await pdfDoc.save();
-
-  // 3. Hitung hash & signature dari PDF tanpa stempel (karena stempel+QR hanya metadata visual)
   const hash = sha256Hex(pdfWithoutStamp);
   const signature = signHex(hash);
   const qrPayload = JSON.stringify({ docId, hash, signature, algo: 'RSA-SHA256' });
   const qrImage = await QRCode.toDataURL(qrPayload);
 
-  // 4. Tambahkan stempel + QR ke PDF
   const finalPdfDoc = await PDFDocument.load(pdfWithoutStamp);
   const helvetica = await finalPdfDoc.embedFont(StandardFonts.Helvetica);
   const bold = await finalPdfDoc.embedFont(StandardFonts.HelveticaBold);
   const page = finalPdfDoc.getPages()[finalPdfDoc.getPageCount() - 1];
   const { width } = page.getSize();
 
-  // === TANDA TANGAN ELEKTRONIK + QR DI POJOK KANAN BAWAH ===
   const qrSize = 90;
-  const qrX = width - qrSize - 30; // 30px dari kanan
-  const qrY = 40; // 40px dari bawah
+  const qrX = width - qrSize - 30;
+  const qrY = 40;
 
-  // Embed QR
   const qrPng = await finalPdfDoc.embedPng(Buffer.from(qrImage.split(',')[1], 'base64'));
-  page.drawImage(qrPng, {
-    x: qrX,
-    y: qrY,
-    width: qrSize,
-    height: qrSize
-  });
+  page.drawImage(qrPng, { x: qrX, y: qrY, width: qrSize, height: qrSize });
 
-  // Teks di atas QR
   const stampLines = [
     "Ditandatangani secara elektronik oleh:",
     "KEPALA DESA PUCANGRO",
@@ -133,7 +119,7 @@ async function doSign(docId, user) {
   ];
   const fontSize = 7.5;
   const textX = qrX;
-  const textY = qrY + qrSize + 8; // 8px di atas QR
+  const textY = qrY + qrSize + 8;
   stampLines.forEach((line, i) => {
     page.drawText(line, {
       x: textX,
@@ -144,11 +130,9 @@ async function doSign(docId, user) {
     });
   });
 
-  // 5. Simpan PDF final
   const signedPdf = await finalPdfDoc.save();
   const signedUrl = await uploadToSupabase(`signed/${docId}_signed.pdf`, signedPdf);
 
-  // 6. Simpan ke Firestore
   await admin.firestore().collection('dokumen_pengajuan').doc(docId).update({
     status: 'Ditandatangani',
     signed_file_url: signedUrl,
@@ -162,13 +146,11 @@ async function doSign(docId, user) {
   return { hash, signature, signedUrl, qrPayload };
 }
 
-// === ROUTE UTAMA ===
+// === ROUTES ===
 app.post('/api/documents/:docId/sign', verifyFirebaseTokenFromHeader, async (req, res) => {
   try {
     if (req.user.role !== 'admin_desa') return res.status(403).json({ success: false, error: 'Akses ditolak' });
-    
     const { hash, signature, signedUrl, qrPayload } = await doSign(req.params.docId, req.user);
-
     res.json({
       success: true,
       message: "Dokumen berhasil ditandatangani oleh Kepala Desa Pucangro",
@@ -188,5 +170,4 @@ app.post('/api/documents/:docId/sign', verifyFirebaseTokenFromHeader, async (req
 });
 
 app.get('/', (req, res) => res.json({ success: true, message: "Smart Dokumen Desa - Ready A+++" }));
-
 app.listen(PORT, () => console.log(`Server jalan di port ${PORT} — RSA + QR = LOCKED`));
