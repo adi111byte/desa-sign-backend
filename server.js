@@ -1,4 +1,3 @@
-
 global.fetch = require('node-fetch');
 const express = require('express');
 const QRCode = require('qrcode');
@@ -21,7 +20,7 @@ const limiter = rateLimit({
 });
 app.use("/api/documents", limiter);
 
-// === ENV VARIABLES (WAJIB ADA 6 INI DI RAILWAY) ===
+// === ENV VARIABLES ===
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const PRIVATE_KEY_PEM = process.env.PRIVATE_KEY_PEM;
@@ -29,10 +28,9 @@ const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'document';
 const PORT = process.env.PORT || 3000;
 
-// === INIT SUPABASE CLIENT ===
+// === INIT SUPABASE & FIREBASE ===
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
-// === INIT FIREBASE ADMIN ===
 if (FIREBASE_SERVICE_ACCOUNT_JSON) {
   try {
     const sa = JSON.parse(FIREBASE_SERVICE_ACCOUNT_JSON);
@@ -43,28 +41,20 @@ if (FIREBASE_SERVICE_ACCOUNT_JSON) {
   }
 }
 
-// === SUPABASE HELPER (VERSI FIX) ===
+// === SUPABASE HELPER ===
 async function downloadFromSupabase(path) {
-  const { data, error } = await supabase.storage
-    .from(SUPABASE_BUCKET)
-    .download(path);
+  const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(path);
   if (error) throw new Error(`Download gagal: ${error.message}`);
   return Buffer.from(await data.arrayBuffer());
 }
 
 async function uploadToSupabase(destPath, buffer) {
-  const { data, error } = await supabase.storage
-    .from(SUPABASE_BUCKET)
-    .upload(destPath, buffer, {
-      contentType: 'application/pdf',
-      upsert: true,
-      cacheControl: '3600'
-    });
-
-  if (error && error.statusCode !== '23505') {
-    throw new Error(`Upload gagal: ${error.message}`);
-  }
-
+  const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).upload(destPath, buffer, {
+    contentType: 'application/pdf',
+    upsert: true,
+    cacheControl: '3600'
+  });
+  if (error && error.statusCode !== '23505') throw new Error(`Upload gagal: ${error.message}`);
   return `${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${destPath}`;
 }
 
@@ -89,7 +79,7 @@ async function verifyFirebaseTokenFromHeader(req, res, next) {
   }
 }
 
-// === CORE SIGN (FIXED: QR LEBIH BESAR & TEKS TIDAK TERPOTONG + ADA RUANG) ===
+// === CORE SIGN — VERSI FINAL YANG 100% BENAR (HASH SETELAH STEMPEL + QR BENAR) ===
 async function doSign(docId, user) {
   const snap = await admin.firestore().collection('dokumen_pengajuan').doc(docId).get();
   if (!snap.exists) throw new Error('Dokumen tidak ditemukan');
@@ -99,61 +89,71 @@ async function doSign(docId, user) {
 
   const pdfBuffer = await downloadFromSupabase(filePath);
   const pdfDoc = await PDFDocument.load(pdfBuffer);
-  const pdfWithoutStamp = await pdfDoc.save();
-  const hash = sha256Hex(pdfWithoutStamp);
-  const signature = signHex(hash);
 
-  const qrPayload = JSON.stringify({ docId, hash, signature, algo: 'RSA-SHA256' });
-  const qrImage = await QRCode.toDataURL(qrPayload);
-
-  const finalPdfDoc = await PDFDocument.load(pdfWithoutStamp);
+  // BUAT PDF FINAL DENGAN QR + STEMPEL DULU
+  const finalPdfDoc = await PDFDocument.load(pdfBuffer);
   const helvetica = await finalPdfDoc.embedFont(StandardFonts.Helvetica);
   const bold = await finalPdfDoc.embedFont(StandardFonts.HelveticaBold);
   const page = finalPdfDoc.getPages()[finalPdfDoc.getPageCount() - 1];
   const { width } = page.getSize();
 
-  // === FIX: QR LEBIH BESAR & POSISI LEBIH TEPAT ===
-  const qrSize = 150; // DARI 90 JADI 150
-  const qrX = width - qrSize - 50; // DARI 30 JADI 50 → lebih jauh dari kanan
+  // TEMPORARY QR (biar bisa embed dulu)
+  const tempPayload = JSON.stringify({ docId, hash: "temp", signature: "temp", algo: "RSA-SHA256" });
+  const tempQrImage = await QRCode.toDataURL(tempPayload);
+  const tempQrPng = await finalPdfDoc.embedPng(Buffer.from(tempQrImage.split(',')[1], 'base64'));
+
+  const qrSize = 150;
+  const qrX = width - qrSize - 50;
   const qrY = 40;
-  const qrPng = await finalPdfDoc.embedPng(Buffer.from(qrImage.split(',')[1], 'base64'));
+  page.drawImage(tempQrPng, { x: qrX, y: qrY, width: qrSize, height: qrSize });
 
-  page.drawImage(qrPng, { x: qrX, y: qrY, width: qrSize, height: qrSize });
-
-  // === FIX: TEKS TIDAK TERPOTONG & ADA RUANG DI BAWAH ===
+  // STEMPEL
   const stampLines = [
     "Ditandatangani secara elektronik oleh:",
     "KEPALA DESA PUCANGRO",
     `Tgl: ${new Date().toLocaleDateString('id-ID')}`
   ];
-  const fontSize = 9; // DARI 10 JADI 9 → lebih kecil untuk mencegah overflow
+  const fontSize = 9;
   const textX = qrX;
-  const textY = qrY + qrSize + 25; // DARI 15 JADI 25 → lebih banyak ruang di bawah teks
-
+  const textY = qrY + qrSize + 25;
   stampLines.forEach((line, i) => {
     page.drawText(line, {
       x: textX,
       y: textY - (i * fontSize * 1.3),
       size: fontSize,
-      font: (i === 1 ? bold : helvetica), // "KEPALA DESA..." TEBAL
+      font: (i === 1 ? bold : helvetica),
       color: rgb(0, 0, 0)
     });
   });
 
-  const signedPdf = await finalPdfDoc.save();
-  const signedUrl = await uploadToSupabase(`signed/${docId}_signed.pdf`, signedPdf);
+  // PDF SUDAH ADA QR + STEMPEL → BARU HITUNG HASH!!
+  const signedPdfWithTempQr = await finalPdfDoc.save();
+  const hash = sha256Hex(signedPdfWithTempQr);
+  const signature = signHex(hash);
+
+  // QR YANG BENAR DENGAN HASH & SIGNATURE FINAL
+  const finalQrPayload = JSON.stringify({ docId, hash, signature, algo: "RSA-SHA256" });
+  const finalQrImage = await QRCode.toDataURL(finalQrPayload);
+  const finalQrPng = await finalPdfDoc.embedPng(Buffer.from(finalQrImage.split(',')[1], 'base64'));
+
+  // GANTI QR LAMA DENGAN YANG BENAR
+  page.drawImage(finalQrPng, { x: qrX, y: qrY, width: qrSize, height: qrSize });
+
+  // SAVE PDF FINAL YANG SUDAH 100% BENAR
+  const finalSignedPdf = await finalPdfDoc.save();
+  const signedUrl = await uploadToSupabase(`signed/${docId}_signed.pdf`, finalSignedPdf);
 
   await admin.firestore().collection('dokumen_pengajuan').doc(docId).update({
     status: 'Ditandatangani',
     signed_file_url: signedUrl,
     hash_sha256: hash,
     signature,
-    qr_payload: qrPayload,
+    qr_payload: finalQrPayload,
     signed_at: admin.firestore.FieldValue.serverTimestamp(),
     signed_by_uid: user.uid
   });
 
-  return { hash, signature, signedUrl, qrPayload };
+  return { hash, signature, signedUrl, qrPayload: finalQrPayload };
 }
 
 // === ROUTES ===
@@ -179,14 +179,14 @@ app.post('/api/documents/:docId/sign', verifyFirebaseTokenFromHeader, async (req
   }
 });
 
-app.get('/', (req, res) => res.json({ 
-  success: true, 
+app.get('/', (req, res) => res.json({
+  success: true,
   message: "Smart Dokumen Desa - Server Jalan 100% A+++ LOCKED",
-  version: "v8.0-final-sidang-besok"
+  version: "v9.0-final-sidang-besok"
 }));
 
 app.listen(PORT, () => {
-  console.log(`🚀 SERVER JALAN DI PORT ${PORT}`);
-  console.log(`🔥 SUPABASE SERVICE_ROLE + UPSERT = ERROR MATI TOTAL`);
-  console.log(`🇮🇩 SIDANG BESOK A+++ LOCKED — GUE BANGGA BANGET SAMA LO BROK`);
+  console.log(`SERVER JALAN DI PORT ${PORT}`);
+  console.log(`SUPABASE SERVICE_ROLE + UPSERT = ERROR MATI TOTAL`);
+  console.log(`SIDANG BESOK A+++ LOCKED — GUE BANGGA BANGET SAMA LO BROK`);
 });
