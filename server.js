@@ -102,10 +102,14 @@ async function doSign(docId, user) {
   const { width, height } = page.getSize();
 
   // ✓ STEP 3: Tentukan posisi QR dan Stempel
-  const qrSize = 150;
-  const padding = 50;
+  const qrSize = 120;
+  const padding = 40;
   const qrX = width - qrSize - padding;
-  const qrY = height - qrSize - 80;
+  const qrY = 40;  // Posisi di atas kiri bawah
+  
+  console.log(`[SIGN] → Page size: ${width}x${height}`);
+  console.log(`[SIGN] → QR position: x=${qrX}, y=${qrY}, size=${qrSize}`);
+  console.log(`[SIGN] → Stempel position: x=${qrX}, y=${qrY + qrSize + 20}`);
 
   // ✓ STEP 4: Tambah STEMPEL ke PDF (TANPA QR dulu!)
   console.log(`[SIGN] STEP 4: Add stamp to PDF (without QR)`);
@@ -117,7 +121,7 @@ async function doSign(docId, user) {
   const fontSize = 9;
   const lineHeight = 12;
   const textX = qrX;
-  const textY = qrY - 15;
+  const textY = qrY + qrSize + 20;
 
   stampLines.forEach((line, i) => {
     page.drawText(line, {
@@ -157,24 +161,54 @@ async function doSign(docId, user) {
 
   // ✓ STEP 9: Generate QR code image
   console.log(`[SIGN] STEP 9: Generate QR code image`);
-  const qrImage = await QRCode.toDataURL(qrPayload, {
-    errorCorrectionLevel: 'H',
-    type: 'image/png',
-    width: 300,
-    margin: 1,
-    color: { dark: '#000000', light: '#FFFFFF' }
-  });
-  console.log(`[SIGN] → QR generated successfully`);
+  let qrImage;
+  try {
+    qrImage = await QRCode.toDataURL(qrPayload, {
+      errorCorrectionLevel: 'H',
+      type: 'image/png',
+      width: 300,
+      margin: 2,
+      color: { dark: '#000000', light: '#FFFFFF' }
+    });
+    console.log(`[SIGN] → QR generated successfully (${qrImage.length} bytes)`);
+  } catch (qrErr) {
+    console.error(`[SIGN] → QR generation error: ${qrErr.message}`);
+    throw new Error(`QR generation gagal: ${qrErr.message}`);
+  }
+  
+  // Extract base64 dari data URL
+  const qrBase64 = qrImage.split(',')[1];
+  if (!qrBase64) {
+    throw new Error('QR generation gagal - base64 kosong');
+  }
+  console.log(`[SIGN] → QR Base64 extracted (${qrBase64.length} bytes)`);
 
   // ✓ STEP 10: Embed QR ke PDF yang sudah ada stempel
   console.log(`[SIGN] STEP 10: Embed QR code into PDF`);
-  const qrPng = await pdfDoc.embedPng(Buffer.from(qrImage.split(',')[1], 'base64'));
-  page.drawImage(qrPng, {
-    x: qrX,
-    y: qrY,
-    width: qrSize,
-    height: qrSize
-  });
+  let qrPng;
+  try {
+    const qrBuffer = Buffer.from(qrBase64, 'base64');
+    console.log(`[SIGN] → QR Buffer created (${qrBuffer.length} bytes)`);
+    
+    qrPng = await pdfDoc.embedPng(qrBuffer);
+    console.log(`[SIGN] → QR PNG embedded successfully`);
+  } catch (embedErr) {
+    console.error(`[SIGN] → QR embed error: ${embedErr.message}`);
+    throw new Error(`QR embed gagal: ${embedErr.message}`);
+  }
+
+  try {
+    page.drawImage(qrPng, {
+      x: qrX,
+      y: qrY,
+      width: qrSize,
+      height: qrSize
+    });
+    console.log(`[SIGN] → QR image drawn at position (${qrX}, ${qrY})`);
+  } catch (drawErr) {
+    console.error(`[SIGN] → QR draw error: ${drawErr.message}`);
+    throw new Error(`QR draw gagal: ${drawErr.message}`);
+  }
 
   // ✓ STEP 11: SIMPAN PDF FINAL (Stempel + QR)
   console.log(`[SIGN] STEP 11: Save final PDF with stamp and QR`);
