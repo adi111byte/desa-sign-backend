@@ -41,7 +41,7 @@ if (FIREBASE_SERVICE_ACCOUNT_JSON) {
   }
 }
 
-// === SUPABASE HELPER
+// === SUPABASE HELPER ===
 async function downloadFromSupabase(path) {
   const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(path);
   if (error) throw new Error(`Download gagal: ${error.message}`);
@@ -58,13 +58,13 @@ async function uploadToSupabase(destPath, buffer) {
   return `${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${destPath}`;
 }
 
-// CRYPTO
+// === CRYPTO ===
 const sha256Hex = buf => crypto.createHash('sha256').update(buf).digest('hex');
 const signHex = hashHex => crypto.createSign('RSA-SHA256')
   .update(Buffer.from(hashHex, 'hex')).end()
   .sign(PRIVATE_KEY_PEM, 'base64');
 
-// TOKEN VERIFICATION
+// === TOKEN VERIFICATION ===
 async function verifyFirebaseTokenFromHeader(req, res, next) {
   try {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
@@ -79,7 +79,7 @@ async function verifyFirebaseTokenFromHeader(req, res, next) {
   }
 }
 
-// CORE SIGN — VERSI FINAL 100% BENAR (HASH SETELAH QR FINAL)
+// === CORE SIGN — VERSI FINAL 100% BENAR (HASH SETELAH QR FINAL) ===
 async function doSign(docId, user) {
   const snap = await admin.firestore().collection('dokumen_pengajuan').doc(docId).get();
   if (!snap.exists) throw new Error('Dokumen tidak ditemukan');
@@ -150,7 +150,7 @@ async function doSign(docId, user) {
   return { hash, signature, signedUrl, qrPayload: finalQrPayload };
 }
 
-// ROUTES
+// === ROUTES ===
 app.post('/api/documents/:docId/sign', verifyFirebaseTokenFromHeader, async (req, res) => {
   try {
     if (req.user.role !== 'admin_desa') return res.status(403).json({ success: false, error: 'Akses ditolak' });
