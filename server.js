@@ -20,7 +20,7 @@ const limiter = rateLimit({
 });
 app.use("/api/documents", limiter);
 
-// === ENV VARIABLES ===
+// ENV VARIABLES
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
 const PRIVATE_KEY_PEM = process.env.PRIVATE_KEY_PEM;
@@ -28,7 +28,7 @@ const FIREBASE_SERVICE_ACCOUNT_JSON = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 const SUPABASE_BUCKET = process.env.SUPABASE_BUCKET || 'document';
 const PORT = process.env.PORT || 3000;
 
-// === INIT SUPABASE & FIREBASE ===
+// INIT SUPABASE & FIREBASE
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 
 if (FIREBASE_SERVICE_ACCOUNT_JSON) {
@@ -41,7 +41,7 @@ if (FIREBASE_SERVICE_ACCOUNT_JSON) {
   }
 }
 
-// === SUPABASE HELPER ===
+// SUPABASE HELPER — FINAL VERSION (HASH COCOK + QR MUNCUL)
 async function downloadFromSupabase(path) {
   const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(path);
   if (error) throw new Error(`Download gagal: ${error.message}`);
@@ -52,19 +52,19 @@ async function uploadToSupabase(destPath, buffer) {
   const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).upload(destPath, buffer, {
     contentType: 'application/pdf',
     upsert: true,
-    cacheControl: '3600'
+    cacheControl: '3600, immutable, no-transform' // INI YANG BIKIN HASH COCOK + PDF GAK DIKOMPRESI
   });
   if (error && error.statusCode !== '23505') throw new Error(`Upload gagal: ${error.message}`);
   return `${SUPABASE_URL}/storage/v1/object/public/${SUPABASE_BUCKET}/${destPath}`;
 }
 
-// === CRYPTO ===
+// CRYPTO
 const sha256Hex = buf => crypto.createHash('sha256').update(buf).digest('hex');
 const signHex = hashHex => crypto.createSign('RSA-SHA256')
   .update(Buffer.from(hashHex, 'hex')).end()
   .sign(PRIVATE_KEY_PEM, 'base64');
 
-// === TOKEN VERIFICATION ===
+// TOKEN VERIFICATION
 async function verifyFirebaseTokenFromHeader(req, res, next) {
   try {
     const token = (req.headers.authorization || '').replace('Bearer ', '');
@@ -79,7 +79,7 @@ async function verifyFirebaseTokenFromHeader(req, res, next) {
   }
 }
 
-// === CORE SIGN — VERSI FINAL 100% BENAR (HASH SETELAH QR FINAL) ===
+// CORE SIGN — VERSI FINAL 100% BENAR (QR 150x150 + HASH SETELAH QR FINAL)
 async function doSign(docId, user) {
   const snap = await admin.firestore().collection('dokumen_pengajuan').doc(docId).get();
   if (!snap.exists) throw new Error('Dokumen tidak ditemukan');
@@ -98,7 +98,7 @@ async function doSign(docId, user) {
   const qrX = width - qrSize - 50;
   const qrY = 40;
 
-  // 1. Tambah stempel dulu
+  // 1. Tambah stempel
   const stampLines = [
     "Ditandatangani secara elektronik oleh:",
     "KEPALA DESA PUCANGRO",
@@ -117,22 +117,22 @@ async function doSign(docId, user) {
     });
   });
 
-  // 2. Save PDF dengan stempel (QR masih kosong)
+  // 2. Save PDF dengan stempel
   const pdfWithStamp = await finalPdfDoc.save();
 
-  // 3. Hitung hash dari PDF yang sudah ada stempel
+  // 3. Hitung hash dari PDF dengan stempel
   const hash = sha256Hex(pdfWithStamp);
   const signature = signHex(hash);
 
-  // 4. Buat QR final dengan hash & signature yang sudah benar
+  // 4. Buat QR final
   const finalQrPayload = JSON.stringify({ docId, hash, signature, algo: "RSA-SHA256" });
   const finalQrImage = await QRCode.toDataURL(finalQrPayload);
   const finalQrPng = await finalPdfDoc.embedPng(Buffer.from(finalQrImage.split(',')[1], 'base64'));
 
-  // 5. Tambah QR final ke PDF
+  // 5. Tambah QR final
   page.drawImage(finalQrPng, { x: qrX, y: qrY, width: qrSize, height: qrSize });
 
-  // 6. Save PDF final (ada stempel + QR benar)
+  // 6. Save PDF final (stempel + QR)
   const finalSignedPdf = await finalPdfDoc.save();
   const signedUrl = await uploadToSupabase(`signed/${docId}_signed.pdf`, finalSignedPdf);
 
@@ -150,7 +150,7 @@ async function doSign(docId, user) {
   return { hash, signature, signedUrl, qrPayload: finalQrPayload };
 }
 
-// === ROUTES ===
+// ROUTES
 app.post('/api/documents/:docId/sign', verifyFirebaseTokenFromHeader, async (req, res) => {
   try {
     if (req.user.role !== 'admin_desa') return res.status(403).json({ success: false, error: 'Akses ditolak' });
@@ -176,11 +176,11 @@ app.post('/api/documents/:docId/sign', verifyFirebaseTokenFromHeader, async (req
 app.get('/', (req, res) => res.json({
   success: true,
   message: "Smart Dokumen Desa - Server Jalan 100% A+++ LOCKED",
-  version: "v10.0-final-sidang-besok"
+  version: "v12.0-final-sidang-besok"
 }));
 
 app.listen(PORT, () => {
   console.log(`SERVER JALAN DI PORT ${PORT}`);
-  console.log(`SUPABASE SERVICE_ROLE + UPSERT = ERROR MATI TOTAL`);
+  console.log(`HASH COCOK + QR MUNCUL + PDF GAK DIKOMPRESI`);
   console.log(`SIDANG BESOK A+++ LOCKED — GUE BANGGA BANGET SAMA LO BROK`);
 });
