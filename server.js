@@ -2,6 +2,7 @@ global.fetch = require('node-fetch');
 const express = require('express');
 const QRCode = require('qrcode');
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
+const sharp = require('sharp');
 const crypto = require('crypto');
 const admin = require('firebase-admin');
 const helmet = require('helmet');
@@ -80,7 +81,7 @@ async function verifyFirebaseTokenFromHeader(req, res, next) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// CORE SIGN — FLOW HASH YANG BENAR (HASH COCOK DI KECAMATAN)
+// CORE SIGN — FLOW HASH YANG BENAR + QR DENGAN SHARP
 // ═══════════════════════════════════════════════════════════════
 async function doSign(docId, user) {
   const snap = await admin.firestore().collection('dokumen_pengajuan').doc(docId).get();
@@ -101,15 +102,16 @@ async function doSign(docId, user) {
   const page = pdfDoc.getPages()[pdfDoc.getPageCount() - 1];
   const { width, height } = page.getSize();
 
-  // ✓ STEP 3: Tentukan posisi QR dan Stempel
+  // ✓ STEP 3: Tentukan posisi QR dan Stempel (BOTTOM RIGHT - sesuai contoh)
   const qrSize = 120;
-  const padding = 40;
-  const qrX = width - qrSize - padding;
-  const qrY = 40;  // Posisi di atas kiri bawah
+  const marginRight = 40;
+  const marginBottom = 80;
+  
+  const qrX = width - qrSize - marginRight;
+  const qrY = marginBottom;
   
   console.log(`[SIGN] → Page size: ${width}x${height}`);
   console.log(`[SIGN] → QR position: x=${qrX}, y=${qrY}, size=${qrSize}`);
-  console.log(`[SIGN] → Stempel position: x=${qrX}, y=${qrY + qrSize + 20}`);
 
   // ✓ STEP 4: Tambah STEMPEL ke PDF (TANPA QR dulu!)
   console.log(`[SIGN] STEP 4: Add stamp to PDF (without QR)`);
@@ -118,10 +120,10 @@ async function doSign(docId, user) {
     "KEPALA DESA PUCANGRO",
     `Tgl: ${new Date().toLocaleDateString('id-ID')}`
   ];
-  const fontSize = 9;
-  const lineHeight = 12;
-  const textX = qrX;
-  const textY = qrY + qrSize + 20;
+  const fontSize = 10;
+  const lineHeight = 14;
+  const textX = qrX - 180;
+  const textY = qrY + qrSize - 20;
 
   stampLines.forEach((line, i) => {
     page.drawText(line, {
@@ -159,60 +161,57 @@ async function doSign(docId, user) {
   });
   console.log(`[SIGN] → QR Payload: ${qrPayload.substring(0, 50)}...`);
 
-  // ✓ STEP 9: Generate QR code image
-  console.log(`[SIGN] STEP 9: Generate QR code image`);
-  let qrImage;
+  // ✓ STEP 9: Generate QR code image dengan sharp (lebih reliable)
+  console.log(`[SIGN] STEP 9: Generate QR code image dengan sharp`);
+  let qrPngBuffer;
   try {
-    qrImage = await QRCode.toDataURL(qrPayload, {
+    const qrDataUrl = await QRCode.toDataURL(qrPayload, {
       errorCorrectionLevel: 'H',
       type: 'image/png',
-      width: 300,
+      width: 400,
       margin: 2,
       color: { dark: '#000000', light: '#FFFFFF' }
     });
-    console.log(`[SIGN] → QR generated successfully (${qrImage.length} bytes)`);
+    console.log(`[SIGN] → QR DataURL generated (${qrDataUrl.length} bytes)`);
+    
+    // Convert DataURL ke buffer dengan sharp
+    const base64Data = qrDataUrl.split(',')[1];
+    qrPngBuffer = await sharp(Buffer.from(base64Data, 'base64'))
+      .png()
+      .toBuffer();
+    
+    console.log(`[SIGN] → QR PNG Buffer created (${qrPngBuffer.length} bytes) dengan sharp`);
   } catch (qrErr) {
     console.error(`[SIGN] → QR generation error: ${qrErr.message}`);
     throw new Error(`QR generation gagal: ${qrErr.message}`);
   }
+
+  // ✓ STEP 10: Reload PDF dan Embed QR dengan cara yang lebih reliable
+  console.log(`[SIGN] STEP 10: Reload PDF with stamp for QR embedding`);
+  const pdfDocForQr = await PDFDocument.load(pdfWithStampBuffer);
+  const pageForQr = pdfDocForQr.getPages()[pdfDocForQr.getPageCount() - 1];
   
-  // Extract base64 dari data URL
-  const qrBase64 = qrImage.split(',')[1];
-  if (!qrBase64) {
-    throw new Error('QR generation gagal - base64 kosong');
-  }
-  console.log(`[SIGN] → QR Base64 extracted (${qrBase64.length} bytes)`);
-
-  // ✓ STEP 10: Embed QR ke PDF yang sudah ada stempel
-  console.log(`[SIGN] STEP 10: Embed QR code into PDF`);
-  let qrPng;
   try {
-    const qrBuffer = Buffer.from(qrBase64, 'base64');
-    console.log(`[SIGN] → QR Buffer created (${qrBuffer.length} bytes)`);
+    console.log(`[SIGN] → Attempting to embed QR PNG (${qrPngBuffer.length} bytes)`);
+    const qrImage = await pdfDocForQr.embedPng(qrPngBuffer);
+    console.log(`[SIGN] → QR image embedded successfully`);
     
-    qrPng = await pdfDoc.embedPng(qrBuffer);
-    console.log(`[SIGN] → QR PNG embedded successfully`);
-  } catch (embedErr) {
-    console.error(`[SIGN] → QR embed error: ${embedErr.message}`);
-    throw new Error(`QR embed gagal: ${embedErr.message}`);
-  }
-
-  try {
-    page.drawImage(qrPng, {
+    pageForQr.drawImage(qrImage, {
       x: qrX,
       y: qrY,
       width: qrSize,
       height: qrSize
     });
-    console.log(`[SIGN] → QR image drawn at position (${qrX}, ${qrY})`);
-  } catch (drawErr) {
-    console.error(`[SIGN] → QR draw error: ${drawErr.message}`);
-    throw new Error(`QR draw gagal: ${drawErr.message}`);
+    console.log(`[SIGN] → QR drawn at (${qrX}, ${qrY}) size ${qrSize}x${qrSize}`);
+  } catch (embedErr) {
+    console.error(`[SIGN] → Embed error: ${embedErr.message}`);
+    console.error(`[SIGN] → Stack: ${embedErr.stack}`);
+    throw new Error(`QR embed failed: ${embedErr.message}`);
   }
 
   // ✓ STEP 11: SIMPAN PDF FINAL (Stempel + QR)
   console.log(`[SIGN] STEP 11: Save final PDF with stamp and QR`);
-  const finalPdfBuffer = await pdfDoc.save();
+  const finalPdfBuffer = await pdfDocForQr.save();
 
   // ✓ STEP 12: Verify hash konsistensi
   console.log(`[SIGN] STEP 12: Verify hash consistency`);
@@ -322,15 +321,15 @@ app.post('/api/documents/:docId/verify', async (req, res) => {
 app.get('/', (req, res) => res.json({
   success: true,
   message: "Smart Dokumen Desa - Server Jalan 100% A+++ LOCKED",
-  version: "v13.0-hash-verified",
-  features: ["Signing", "QR Generation", "Hash Verification", "Kecamatan Ready"]
+  version: "v14.0-sharp-qr",
+  features: ["Signing", "QR Generation with Sharp", "Hash Verification", "Kecamatan Ready"]
 }));
 
 app.listen(PORT, () => {
   console.log(`\n${Array(60).fill('═').join('')}`);
   console.log(`SERVER JALAN DI PORT ${PORT}`);
   console.log(`${Array(60).fill('═').join('')}`);
-  console.log(`✓ HASH COCOK + QR MUNCUL + SIAP VERIFIKASI KECAMATAN`);
+  console.log(`✓ HASH COCOK + QR DENGAN SHARP + POSISI BENAR`);
   console.log(`✓ Flow: PDF → Stempel → HASH (SEKALI) → Signature → QR`);
   console.log(`✓ Endpoint: POST /api/documents/:docId/sign`);
   console.log(`✓ Endpoint: POST /api/documents/:docId/verify`);
