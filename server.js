@@ -182,7 +182,7 @@ async function doSign(docId, user) {
 
   // ✓ STEP 12: Verify hash konsistensi
   console.log(`[SIGN] STEP 12: Verify hash consistency`);
-  const verifyHash = sha256Hex(pdfWithStampBuffer); // Hash dari PDF + stempel (tanpa QR)
+  const verifyHash = sha256Hex(pdfWithStampBuffer);
   console.log(`[SIGN] → Original hash:  ${hash.substring(0, 16)}...`);
   console.log(`[SIGN] → Verify hash:    ${verifyHash.substring(0, 16)}...`);
   console.log(`[SIGN] → Match: ${hash === verifyHash ? '✓ YES' : '✗ NO'}`);
@@ -217,10 +217,10 @@ app.post('/api/documents/:docId/sign', verifyFirebaseTokenFromHeader, async (req
       return res.status(403).json({ success: false, error: 'Akses ditolak' });
     }
 
-    console.log(`\n${'═'.repeat(60)}`);
+    console.log(`\n${Array(60).fill('═').join('')}`);
     console.log(`SIGNING DOCUMENT: ${req.params.docId}`);
     console.log(`By: ${req.user.name || req.user.email}`);
-    console.log(`${'═'.repeat(60)}\n`);
+    console.log(`${Array(60).fill('═').join('')}\n`);
 
     const { hash, signature, signedUrl, qrPayload } = await doSign(req.params.docId, req.user);
 
@@ -259,9 +259,9 @@ app.post('/api/documents/:docId/verify', async (req, res) => {
     const docData = snap.data();
     const qrData = JSON.parse(qr_payload);
 
-    console.log(`\n${'═'.repeat(60)}`);
+    console.log(`\n${Array(60).fill('═').join('')}`);
     console.log(`VERIFYING DOCUMENT: ${req.params.docId}`);
-    console.log(`${'═'.repeat(60)}\n`);
+    console.log(`${Array(60).fill('═').join('')}\n`);
     console.log(`Database hash: ${docData.hash_sha256.substring(0, 16)}...`);
     console.log(`QR hash:       ${qrData.hash.substring(0, 16)}...`);
 
@@ -293,12 +293,12 @@ app.get('/', (req, res) => res.json({
 }));
 
 app.listen(PORT, () => {
-  console.log(`\n${'═'.repeat(60)}`);
+  console.log(`\n${Array(60).fill('═').join('')}`);
   console.log(`SERVER JALAN DI PORT ${PORT}`);
-  console.log(`═`.repeat(60)}`);
+  console.log(`${Array(60).fill('═').join('')}`);
   console.log(`✓ HASH COCOK + QR MUNCUL + SIAP VERIFIKASI KECAMATAN`);
   console.log(`✓ Flow: PDF → Stempel → HASH (SEKALI) → Signature → QR`);
   console.log(`✓ Endpoint: POST /api/documents/:docId/sign`);
   console.log(`✓ Endpoint: POST /api/documents/:docId/verify`);
-  console.log(`═`.repeat(60)}\n`);
+  console.log(`${Array(60).fill('═').join('')}\n`);
 });
