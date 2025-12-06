@@ -139,32 +139,18 @@ async function doSign(docId, user) {
   console.log(`[SIGN] STEP 5: Save PDF with stamp only`);
   const pdfWithStampBuffer = await pdfDoc.save();
 
-  // ✓ STEP 6: HITUNG HASH dari PDF + Stempel (SEKALI SAJA!)
-  console.log(`[SIGN] STEP 6: Calculate SHA256 hash from PDF+stamp`);
-  const hash = sha256Hex(pdfWithStampBuffer);
-  console.log(`[SIGN] → Hash calculated: ${hash.substring(0, 16)}...`);
-
-  // ✓ STEP 7: SIGN HASH dengan Private Key
-  console.log(`[SIGN] STEP 7: Sign hash with private key (RSA-SHA256)`);
-  const signature = signHex(hash);
-  console.log(`[SIGN] → Signature created: ${signature.substring(0, 16)}...`);
-
-  // ✓ STEP 8: Buat QR payload dengan HASH & SIGNATURE FINAL
-  console.log(`[SIGN] STEP 8: Create QR payload with final hash & signature`);
-  const qrPayload = JSON.stringify({
-    docId,
-    hash,
-    signature,
-    algo: "RSA-SHA256",
-    signed_at: new Date().toISOString(),
-    desa: "PUCANGRO"
-  });
-  console.log(`[SIGN] → QR Payload: ${qrPayload.substring(0, 50)}...`);
-
   // ✓ STEP 9: Generate QR code image dengan sharp (lebih reliable)
   console.log(`[SIGN] STEP 9: Generate QR code image dengan sharp`);
   let qrPngBuffer;
   try {
+    const qrPayload = JSON.stringify({
+      docId,
+      hash: "", // akan diisi nanti
+      signature: "",
+      algo: "RSA-SHA256",
+      signed_at: new Date().toISOString(),
+      desa: "PUCANGRO"
+    });
     const qrDataUrl = await QRCode.toDataURL(qrPayload, {
       errorCorrectionLevel: 'H',
       type: 'image/png',
@@ -213,9 +199,31 @@ async function doSign(docId, user) {
   console.log(`[SIGN] STEP 11: Save final PDF with stamp and QR`);
   const finalPdfBuffer = await pdfDocForQr.save();
 
+  // ✓ STEP 6: HITUNG HASH dari PDF FINAL (dengan QR) - INI YANG BARU!
+  console.log(`[SIGN] STEP 6: Calculate SHA256 hash from PDF+stamp+QR`);
+  const hash = sha256Hex(finalPdfBuffer);
+  console.log(`[SIGN] → Hash calculated: ${hash.substring(0, 16)}...`);
+
+  // ✓ STEP 7: SIGN HASH dengan Private Key
+  console.log(`[SIGN] STEP 7: Sign hash with private key (RSA-SHA256)`);
+  const signature = signHex(hash);
+  console.log(`[SIGN] → Signature created: ${signature.substring(0, 16)}...`);
+
+  // ✓ STEP 8: Buat QR payload dengan HASH & SIGNATURE FINAL
+  console.log(`[SIGN] STEP 8: Create QR payload with final hash & signature`);
+  const qrPayloadFinal = JSON.stringify({
+    docId,
+    hash,
+    signature,
+    algo: "RSA-SHA256",
+    signed_at: new Date().toISOString(),
+    desa: "PUCANGRO"
+  });
+  console.log(`[SIGN] → QR Payload: ${qrPayloadFinal.substring(0, 50)}...`);
+
   // ✓ STEP 12: Verify hash konsistensi
   console.log(`[SIGN] STEP 12: Verify hash consistency`);
-  const verifyHash = sha256Hex(pdfWithStampBuffer);
+  const verifyHash = sha256Hex(finalPdfBuffer);
   console.log(`[SIGN] → Original hash:  ${hash.substring(0, 16)}...`);
   console.log(`[SIGN] → Verify hash:    ${verifyHash.substring(0, 16)}...`);
   console.log(`[SIGN] → Match: ${hash === verifyHash ? '✓ YES' : '✗ NO'}`);
@@ -232,7 +240,7 @@ async function doSign(docId, user) {
     signed_file_url: signedUrl,
     hash_sha256: hash,
     signature,
-    qr_payload: qrPayload,
+    qr_payload: qrPayloadFinal,
     signed_at: admin.firestore.FieldValue.serverTimestamp(),
     signed_by_uid: user.uid,
     signed_by_name: user.name || 'Admin Desa',
@@ -240,7 +248,7 @@ async function doSign(docId, user) {
   });
   console.log(`[SIGN] ✓ SIGNING COMPLETE`);
 
-  return { hash, signature, signedUrl, qrPayload };
+  return { hash, signature, signedUrl, qrPayloadFinal };
 }
 
 // ROUTES
