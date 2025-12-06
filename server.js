@@ -246,7 +246,7 @@ async function doSign(docId, user) {
 // ROUTES
 app.post('/api/documents/:docId/sign', verifyFirebaseTokenFromHeader, async (req, res) => {
   try {
-    if (req.user.role !== 'admin_desa') {
+    if (req.user.role !== 'Admin Desa') {
       return res.status(403).json({ success: false, error: 'Akses ditolak' });
     }
 
